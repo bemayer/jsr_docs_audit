@@ -1,3 +1,21 @@
+//! Command-line interface for JSR documentation auditing.
+//!
+//! This binary provides a CLI tool for analyzing documentation coverage of JSR packages.
+//! It can audit packages from the JSR registry, local directories, or pre-generated doc-node files.
+//!
+//! ## Usage
+//!
+//! ```bash
+//! # Audit a package from JSR registry
+//! jsr-doc-audit @scope/package@version
+//!
+//! # Audit a local package directory
+//! jsr-doc-audit --local-path ./my-package
+//!
+//! # Audit from pre-generated doc-nodes JSON
+//! jsr-doc-audit --doc-nodes ./raw.json
+//! ```
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -5,14 +23,25 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context};
 use audit_script::{
-    analyze_doc_nodes, generate_doc_nodes_from_files, DocNodesByUrl, DocumentationCoverage,
+    analyze_doc_nodes,
+    generate_doc_nodes_from_files,
+    generate_doc_nodes_from_local_path,
+    types::{PackageSpec, format_specifier},
+    DocNodesByUrl, DocumentationCoverage,
 };
 use clap::Parser;
 use indexmap::IndexMap;
+use log::{debug, info};
 use owo_colors::OwoColorize;
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use url::Url;
+
+/// HTTP request timeout in seconds
+const HTTP_TIMEOUT_SECS: u64 = 30;
+
+/// Width of the progress bar in characters
+const PROGRESS_BAR_WIDTH: usize = 30;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -29,9 +58,13 @@ struct Cli {
     /// JSR package spec, e.g. @scope/name@1.2.3 (version optional)
     #[arg(
         value_name = "@scope/name[@version]",
-        required_unless_present = "doc_nodes"
+        required_unless_present_any = ["doc_nodes", "local_path"]
     )]
     package: Option<String>,
+
+    /// Path to a local JSR package directory (must contain deno.json)
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["package", "doc_nodes"])]
+    local_path: Option<PathBuf>,
 
     /// Override the JSR API root (default: https://jsr.io/api)
     #[arg(
@@ -54,30 +87,66 @@ struct Cli {
     /// Optionally write the generated raw doc-nodes JSON to a file
     #[arg(long, value_name = "FILE")]
     write_raw: Option<PathBuf>,
+
+    /// Enable detailed debug output exploring all doc nodes structure
+    #[arg(long)]
+    debug_explore: bool,
+
+    /// Enable verbose logging (can also use RUST_LOG=debug)
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
 
+    // Initialize logger
+    env_logger::Builder::from_default_env()
+        .filter_level(if args.verbose {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Info
+        })
+        .init();
+
+    info!("Starting JSR documentation audit");
+    debug!("API root: {}", args.api_root);
+    debug!("Docs origin: {}", args.docs_origin);
+
     let endpoints = Endpoints::new(&args.api_root, &args.docs_origin)?;
     let client = Client::builder()
         .user_agent(format!("jsr-doc-audit/{}", env!("CARGO_PKG_VERSION")))
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
         .build()?;
 
     let (doc_nodes, resolved_spec) = if let Some(path) = args.doc_nodes {
+        info!("Loading doc-nodes from file: {}", path.display());
         let json = fs::read_to_string(&path)
             .with_context(|| format!("failed to read doc-nodes file at {}", path.display()))?;
         let parsed: DocNodesByUrl = serde_json::from_str(&json)
             .context("failed to parse doc-nodes JSON; ensure you're pointing at a raw.json file")?;
+        debug!("Loaded {} module(s) from file", parsed.len());
         (parsed, None)
+    } else if let Some(local_path) = args.local_path {
+        info!("Loading package from local path: {}", local_path.display());
+        let doc_nodes = generate_doc_nodes_from_local_path(&local_path)?;
+        debug!("Built doc nodes for {} module(s)", doc_nodes.len());
+        (doc_nodes, None)
     } else {
         let spec_str = args.package.as_deref().expect("clap ensures it is present");
+        info!("Fetching package: {}", spec_str);
         let spec = PackageSpec::parse(spec_str)?;
         let resolved = resolve_spec(&client, &endpoints, spec)?;
+        info!("Resolved to @{}/{}@{}", resolved.scope, resolved.package, resolved.version);
+        debug!("Building doc nodes from registry...");
         let doc_nodes = build_doc_nodes_from_registry(&client, &endpoints, &resolved)?;
+        debug!("Built doc nodes for {} module(s)", doc_nodes.len());
         (doc_nodes, Some(resolved))
     };
+
+    if args.debug_explore {
+        debug_explore_doc_nodes(&doc_nodes);
+    }
 
     let coverage = analyze_doc_nodes(&doc_nodes);
 
@@ -114,15 +183,16 @@ fn resolve_spec(
 
 fn fetch_latest_version(
     client: &Client,
-    endpoints: &Endpoints,
+    _endpoints: &Endpoints,
     scope: &str,
     package: &str,
 ) -> anyhow::Result<String> {
-    let url = endpoints.api_url(["scopes", scope, "packages", package, "versions", "latest"])?;
+    debug!("Fetching latest version for @{}/{}", scope, package);
+    let url = format!("https://jsr.io/@{}/{}/meta.json", scope, package);
     let response = client
-        .get(url.clone())
+        .get(&url)
         .send()
-        .with_context(|| format!("failed to request latest version from {url}"))?;
+        .with_context(|| format!("failed to request package metadata from {url}"))?;
 
     if !response.status().is_success() {
         bail!(
@@ -131,11 +201,12 @@ fn fetch_latest_version(
         );
     }
 
-    let payload: LatestVersionResponse = response
+    let payload: PackageMetadata = response
         .json()
-        .context("failed to decode version response")?;
+        .context("failed to decode package metadata")?;
 
-    Ok(payload.version)
+    debug!("Latest version: {}", payload.latest);
+    Ok(payload.latest)
 }
 
 fn build_doc_nodes_from_registry(
@@ -151,8 +222,29 @@ fn build_doc_nodes_from_registry(
         &spec.package,
         &spec.version,
         &metadata.exports,
+        &IndexMap::new(), // No import map for registry packages
         &files,
     )
+}
+
+fn debug_explore_doc_nodes(doc_nodes: &DocNodesByUrl) {
+    use log::debug;
+
+    debug!("========== DEBUG EXPLORATION ==========");
+    debug!("Total modules: {}", doc_nodes.len());
+
+    for (specifier, nodes) in doc_nodes.iter() {
+        debug!("Module: {}", specifier);
+        debug!("  Nodes: {}", nodes.len());
+
+        for node in nodes {
+            debug!("  - {} ({:?})", node.get_name(), node.def);
+            debug!("    JSDoc empty: {}", node.js_doc.is_empty());
+            debug!("    Declaration: {:?}", node.declaration_kind);
+        }
+    }
+
+    debug!("=======================================");
 }
 
 fn print_report(
@@ -173,12 +265,12 @@ fn print_report(
 
     let fraction = coverage.fraction_documented();
     let pct = coverage.percentage_documented();
-    let progress = progress_bar(fraction, 30);
+    let progress = progress_bar(fraction, PROGRESS_BAR_WIDTH);
     let pct_display = format!("{pct}%");
     let pct_colored = match pct {
-        90..=100 => format!("{}", pct_display.clone().green().bold()),
-        70..=89 => format!("{}", pct_display.clone().yellow().bold()),
-        _ => format!("{}", pct_display.clone().red().bold()),
+        90..=100 => pct_display.green().bold().to_string(),
+        70..=89 => pct_display.yellow().bold().to_string(),
+        _ => pct_display.red().bold().to_string(),
     };
 
     println!(
@@ -270,14 +362,6 @@ fn progress_bar(fraction: f32, width: usize) -> String {
     }
 }
 
-fn format_specifier(specifier: &url::Url) -> String {
-    let path = specifier.path().trim_start_matches('/');
-    if path.is_empty() {
-        specifier.to_string()
-    } else {
-        path.to_string()
-    }
-}
 
 struct SymbolRow {
     module: String,
@@ -396,51 +480,6 @@ fn print_symbol_table(title: String, mut rows: Vec<SymbolRow>) {
 }
 
 #[derive(Debug, Clone)]
-struct PackageSpec {
-    scope: String,
-    package: String,
-    version: Option<String>,
-}
-
-impl PackageSpec {
-    fn parse(input: &str) -> anyhow::Result<Self> {
-        let trimmed = input.trim();
-        if trimmed.is_empty() {
-            bail!("package specifier cannot be empty");
-        }
-
-        let without_at = trimmed.strip_prefix('@').unwrap_or(trimmed);
-        let (scope, rest) = without_at
-            .split_once('/')
-            .ok_or_else(|| anyhow!("package specifier must be in the form scope/name"))?;
-
-        if scope.is_empty() {
-            bail!("scope cannot be empty");
-        }
-
-        let (package, version) = if let Some((pkg, ver)) = rest.split_once('@') {
-            (pkg, Some(ver))
-        } else if let Some((pkg, ver)) = rest.split_once('/') {
-            (pkg, Some(ver))
-        } else {
-            (rest, None)
-        };
-
-        if package.is_empty() {
-            bail!("package name cannot be empty");
-        }
-
-        let version = version.filter(|v| !v.is_empty()).map(str::to_string);
-
-        Ok(Self {
-            scope: scope.to_string(),
-            package: package.to_string(),
-            version,
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
 struct ResolvedSpec {
     scope: String,
     package: String,
@@ -449,8 +488,10 @@ struct ResolvedSpec {
 
 #[derive(Debug, Clone)]
 struct Endpoints {
+    #[allow(dead_code)]
     api_root: Url,
     registry_origin: Url,
+    #[allow(dead_code)]
     docs_origin: Url,
 }
 
@@ -468,6 +509,7 @@ impl Endpoints {
         })
     }
 
+    #[allow(dead_code)]
     fn api_url<const N: usize>(&self, segments: [&str; N]) -> anyhow::Result<Url> {
         let mut url = self.api_root.clone();
         {
@@ -478,22 +520,6 @@ impl Endpoints {
             for segment in segments {
                 path.push(segment);
             }
-        }
-        Ok(url)
-    }
-
-    #[allow(dead_code)]
-    fn docs_url(&self, spec: &ResolvedSpec) -> anyhow::Result<Url> {
-        let mut url = self.docs_origin.clone();
-        {
-            let mut path = url
-                .path_segments_mut()
-                .map_err(|_| anyhow!("docs origin URL cannot contain query or fragment"))?;
-            path.pop_if_empty();
-            path.push(&format!("@{}", spec.scope));
-            path.push(&spec.package);
-            path.push(&spec.version);
-            path.push("raw.json");
         }
         Ok(url)
     }
@@ -548,8 +574,8 @@ fn normalize_base_url(input: &str) -> anyhow::Result<Url> {
 }
 
 #[derive(Debug, Deserialize)]
-struct LatestVersionResponse {
-    version: String,
+struct PackageMetadata {
+    latest: String,
 }
 
 #[derive(Debug, Deserialize)]
