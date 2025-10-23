@@ -2,18 +2,44 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "type": "lldb",
+      "type": "lldb-dap",
       "request": "launch",
       "name": "Debug audit_script",
-      "cargo": {
-        "args": ["build", "-p", "audit_script", "--bin=cli"],
-        "filter": {
-          "name": "cli",
-          "kind": "bin"
-        }
-      },
+      "program": "${workspaceFolder}/target/debug/cli",
       "args": ["@bemayer/rubique"],
-      "cwd": "${workspaceFolder}"
+      "cwd": "${workspaceFolder}",
+      "preRunCommands": [
+        "!platform shell cargo build --bin cli"
+      ],
+      "commandEscapePrefix": "`"
+    },
+    {
+      "type": "lldb-dap",
+      "request": "launch",
+      "name": "Debug audit_script (verbose)",
+      "program": "${workspaceFolder}/target/debug/cli",
+      "args": ["@bemayer/rubique", "--verbose"],
+      "cwd": "${workspaceFolder}",
+      "preRunCommands": [
+        "!platform shell cargo build --bin cli"
+      ],
+      "commandEscapePrefix": "`"
+    },
+    {
+      "type": "lldb-dap",
+      "request": "launch",
+      "name": "Debug audit_script (with exploration)",
+      "program": "${workspaceFolder}/target/debug/cli",
+      "args": ["@bemayer/rubique", "--debug-explore"],
+      "cwd": "${workspaceFolder}",
+      "preRunCommands": [
+        "!platform shell cargo build --bin cli"
+      ],
+      "commandEscapePrefix": "`"
     }
   ]
 }
+
+// LLDB DAP configuration for Rust project
+// On macOS, find lldb-dap binary with: xcrun -f lldb-dap
+// The '!' prefix in preRunCommands ensures build errors stop the debug session

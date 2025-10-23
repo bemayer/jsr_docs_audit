@@ -1,7 +1,17 @@
 # JSR Documentation Audit
 
-A standalone Rust crate that mirrors the JSR registry's documentation analysis
-so you can audit documentation coverage for any published package.
+Analyze documentation coverage for JSR packages, both via CLI and web interface powered by WebAssembly.
+
+## 🌐 Web Interface
+
+**[Live Demo](https://bemayer.github.io/jsr_docs_audit/)** (once deployed)
+
+Features:
+- 🔍 Search JSR packages with real-time autocomplete
+- 📊 Instant documentation coverage analysis
+- 📝 Detailed symbol-level reporting
+- ⚡ Runs entirely in your browser via WebAssembly
+- 🎨 Clean, responsive interface
 
 ## CLI usage
 
@@ -14,6 +24,10 @@ cargo run -p audit_script -- @scope/name[@version]
   `@bemayer/rubique@1.0.4`).
 - Use `--doc-nodes <FILE>` to analyse a local `raw.json` export without touching
   the network.
+- Use `--local-path <PATH>` to analyse a local JSR package directory:
+  ```powershell
+  cargo run -p audit_script -- --local-path ../Rubique
+  ```
 
 The CLI automatically fetches doc nodes from the public docs bucket. If your
 environment requires a different origin, override it with either the flag or the
@@ -49,11 +63,88 @@ Undocumented symbols (3)
   another.ts        helper      function   src/another.ts:17:5
 ```
 
-## Development
+## 🔧 Building the Web Interface
 
-```powershell
-cargo fmt -p audit_script
-cargo check -p audit_script
+### Prerequisites
+
+- Rust (with `wasm32-unknown-unknown` target)
+- wasm-pack
+
+```bash
+# Install wasm32 target
+rustup target add wasm32-unknown-unknown
+
+# Install wasm-pack
+curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 ```
 
-Run `cargo run -p audit_script -- --help` to see the full option list.
+### Build
+
+```bash
+# Build everything
+./build.sh
+
+# Or manually
+wasm-pack build --target web --out-dir dist/pkg --no-default-features --release
+```
+
+### Local Testing
+
+```bash
+python3 -m http.server 8000 --directory dist
+```
+
+Then open http://localhost:8000
+
+## 🚀 Deployment
+
+The project includes a GitHub Actions workflow that automatically builds and deploys to GitHub Pages on push to `main`/`master`.
+
+To set up GitHub Pages:
+1. Go to repository Settings → Pages
+2. Source: "GitHub Actions"
+3. Push to `main`/`master` to trigger deployment
+
+## Development
+
+```bash
+# Format code
+cargo fmt
+
+# Check compilation
+cargo check
+
+# Build CLI
+cargo build --features cli
+
+# Build WASM
+cargo build --target wasm32-unknown-unknown --no-default-features
+
+# Run CLI
+cargo run --features cli -- --help
+```
+
+## 📁 Project Structure
+
+```
+jsr_docs_audit/
+├── src/
+│   ├── lib.rs          # Core analysis logic
+│   ├── wasm.rs         # WASM bindings
+│   └── bin/
+│       └── cli.rs      # CLI application
+├── dist/
+│   ├── index.html      # Web interface
+│   ├── style.css       # Styling
+│   ├── app.js          # JavaScript app
+│   └── pkg/            # Built WASM (generated)
+├── .github/
+│   └── workflows/
+│       └── deploy.yml  # CI/CD pipeline
+├── build.sh            # Build script
+└── Cargo.toml
+```
+
+## 📜 License
+
+MIT (or specify your license)
