@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>JSR Documentation Audit</title>
+    <meta
+      name="description"
+      content="Analyze documentation coverage of JSR packages in real-time"
+    />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="header">
+      <div class="container">
+        <h1 class="title">JSR Documentation Audit</h1>
+        <p class="subtitle">Analyze documentation coverage of JSR packages</p>
+        <a
+          href="https://github.com/bemayer/jsr_docs_audit"
+          target="_blank"
+          rel="noopener"
+          class="github-link"
+        >
+          View on GitHub
+        </a>
+      </div>
+    </header>
+
+    <main class="main">
+      <div class="container">
+        <section class="search-section">
+          <div class="search-container">
+            <div class="input-wrapper">
+              <input
+                type="text"
+                id="package-input"
+                class="search-input"
+                placeholder="@scope/package or @scope/package@version"
+                autocomplete="off"
+                aria-label="Package name"
+              />
+              <div
+                id="autocomplete-dropdown"
+                class="autocomplete-dropdown hidden"
+              ></div>
+            </div>
+            <button id="audit-button" class="btn-primary">Audit</button>
+          </div>
+          <div id="loading" class="loading hidden">
+            <span class="spinner"></span>
+            <span>Analyzing package...</span>
+          </div>
+          <div id="error" class="error hidden"></div>
+        </section>
+
+        <section id="results-section" class="results-section hidden">
+          <div class="package-card card">
+            <h2>Package Information</h2>
+            <div class="package-info">
+              <p><strong>Name:</strong> <span id="package-name"></span></p>
+              <p>
+                <strong>Version:</strong> <span id="package-version"></span>
+              </p>
+            </div>
+          </div>
+
+          <div class="coverage-card card">
+            <h2>Coverage</h2>
+            <div class="progress-bar-container">
+              <div class="progress-bar">
+                <div id="progress-fill" class="progress-fill"></div>
+              </div>
+              <div class="progress-text" id="progress-text">0%</div>
+            </div>
+            <div class="coverage-stats">
+              <div class="stat">
+                <span class="stat-label">Total Symbols</span>
+                <span class="stat-value" id="total-symbols">0</span>
+              </div>
+              <div class="stat">
+                <span class="stat-label">Documented</span>
+                <span class="stat-value stat-success" id="documented-count"
+                  >0</span
+                >
+              </div>
+              <div class="stat">
+                <span class="stat-label">Undocumented</span>
+                <span class="stat-value stat-danger" id="undocumented-count"
+                  >0</span
+                >
+              </div>
+            </div>
+          </div>
+
+          <div class="symbols-section">
+            <div class="table-container" id="undocumented-container">
+              <h3 class="table-title undocumented-title">
+                Undocumented Symbols (<span id="undocumented-total">0</span>)
+              </h3>
+              <div class="table-wrapper">
+                <table id="undocumented-table" class="symbols-table">
+                  <thead>
+                    <tr>
+                      <th>Module</th>
+                      <th>Symbol</th>
+                      <th>Type</th>
+                      <th>Location</th>
+                    </tr>
+                  </thead>
+                  <tbody id="undocumented-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <details class="documented-details">
+              <summary class="details-summary">
+                Documented Symbols (<span id="documented-total">0</span>)
+              </summary>
+              <div class="table-wrapper">
+                <table id="documented-table" class="symbols-table">
+                  <thead>
+                    <tr>
+                      <th>Module</th>
+                      <th>Symbol</th>
+                      <th>Type</th>
+                      <th>Location</th>
+                    </tr>
+                  </thead>
+                  <tbody id="documented-tbody"></tbody>
+                </table>
+              </div>
+            </details>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <div class="container">
+        <p>
+          <a href="https://jsr.io" target="_blank" rel="noopener">JSR</a> •
+          <a
+            href="https://github.com/bemayer/jsr_docs_audit"
+            target="_blank"
+            rel="noopener"
+            >GitHub</a
+          >
+          • Powered by WebAssembly
+        </p>
+      </div>
+    </footer>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
