@@ -1,13 +1,29 @@
+//! JSR Documentation Audit Library
+//!
+//! This library provides tools for analyzing documentation coverage of JSR (JavaScript Registry) packages.
+//! It generates documentation nodes from TypeScript/JavaScript source files and calculates coverage statistics
+//! based on the presence of JSDoc comments on public exports.
+//!
+//! ## Features
+//!
+//! - Parse and analyze JSR package documentation
+//! - Generate documentation nodes from local directories or in-memory files
+//! - Calculate documentation coverage percentages
+//! - Support for both native (CLI) and WASM (web) targets
+//! - Parallel async operations for efficient processing
+
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use deno_ast::{MediaType, ModuleSpecifier, ParsedSource};
 use deno_doc::node::DeclarationKind;
 use deno_doc::{DocNode, DocNodeDef};
 use deno_error::JsErrorBox;
+use log::{debug, info};
 use deno_graph::analysis::ModuleInfo;
 use deno_graph::ast::{CapturingModuleAnalyzer, DefaultEsParser, ParseOptions};
 use deno_graph::source::{
@@ -18,8 +34,15 @@ use deno_graph::{BuildOptions, GraphKind, ModuleGraph, WorkspaceMember, resolve_
 use deno_semver::{StackString, Version, jsr::JsrPackageReqReference};
 use futures::FutureExt;
 use indexmap::IndexMap;
-use tokio::runtime::Builder as TokioRuntimeBuilder;
 use url::Url;
+
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::runtime::Builder as TokioRuntimeBuilder;
+
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
+
+pub mod types;
 
 /// Mapping of module specifiers to the DocNodes extracted from that module.
 pub type DocNodesByUrl = IndexMap<ModuleSpecifier, Vec<DocNode>>;
@@ -27,36 +50,54 @@ pub type DocNodesByUrl = IndexMap<ModuleSpecifier, Vec<DocNode>>;
 /// Summary of documentation coverage for a package.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DocumentationCoverage {
+    /// Total number of public symbols analyzed.
     pub total_symbols: usize,
+    /// Number of symbols with JSDoc documentation.
     pub documented_symbols: usize,
+    /// Detailed information about documented symbols.
     pub documented_symbol_details: Vec<DocumentedSymbol>,
+    /// Detailed information about undocumented symbols.
     pub undocumented_symbols: Vec<UndocumentedSymbol>,
 }
 
 /// Representation of an undocumented exported symbol for reporting purposes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UndocumentedSymbol {
+    /// Module URL where the symbol is defined.
     pub specifier: ModuleSpecifier,
+    /// Name of the symbol.
     pub name: String,
+    /// Kind of symbol (e.g., "function", "class", "variable").
     pub kind: String,
+    /// Declaration kind (e.g., "export", "default").
     pub declaration_kind: Option<String>,
+    /// Source code location of the symbol.
     pub location: Option<SymbolLocation>,
 }
 
 /// Representation of a documented exported symbol for reporting purposes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DocumentedSymbol {
+    /// Module URL where the symbol is defined.
     pub specifier: ModuleSpecifier,
+    /// Name of the symbol.
     pub name: String,
+    /// Kind of symbol (e.g., "function", "class", "variable").
     pub kind: String,
+    /// Declaration kind (e.g., "export", "default").
     pub declaration_kind: Option<String>,
+    /// Source code location of the symbol.
     pub location: Option<SymbolLocation>,
 }
 
+/// Source code location information for a symbol.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SymbolLocation {
+    /// Source file path.
     pub filename: String,
+    /// Line number (1-indexed).
     pub line: u32,
+    /// Column number (1-indexed).
     pub col: u32,
 }
 
@@ -83,20 +124,46 @@ pub fn analyze_doc_nodes(doc_nodes: &DocNodesByUrl) -> DocumentationCoverage {
     let mut documented_symbol_details = Vec::new();
     let mut undocumented_symbols = Vec::new();
 
+    info!("Analyzing {} module(s)", doc_nodes.len());
+
     for (specifier, nodes) in doc_nodes.iter() {
+        debug!("Module: {}", specifier);
+        debug!("  Total nodes in this module: {}", nodes.len());
+
         for node in nodes {
+            let node_name = node.get_name();
+            let node_kind = format_doc_node_kind(&node.def);
+            let node_decl_kind = format!("{:#?}", node.declaration_kind);
+
+            debug!("  → Node: '{}' (kind: {}, decl: {})", node_name, node_kind, node_decl_kind);
+            debug!("    Location: {}:{}:{}", node.location.filename, node.location.line, node.location.col);
+
             if matches!(node.def, DocNodeDef::ModuleDoc | DocNodeDef::Import { .. }) {
+                debug!("    ⏭️  SKIPPED: ModuleDoc or Import (not counted in coverage)");
                 continue;
             }
 
             if node.declaration_kind == DeclarationKind::Private {
+                debug!("    ⏭️  SKIPPED: Private declaration (not counted in coverage)");
                 continue;
             }
 
             total_symbols += 1;
 
-            if node.js_doc.is_empty() {
-                undocumented_symbols.push(UndocumentedSymbol {
+            debug!("    JSDoc is_empty: {}", node.js_doc.is_empty());
+
+            if !node.js_doc.is_empty() {
+                debug!("    JSDoc content:");
+                if let Some(doc) = &node.js_doc.doc {
+                    debug!("      - doc: {:?}", doc);
+                }
+                debug!("      - tags count: {}", node.js_doc.tags.len());
+                for (i, tag) in node.js_doc.tags.iter().enumerate() {
+                    debug!("      - tag[{}]: {:?}", i, tag);
+                }
+                debug!("    ✅ DOCUMENTED");
+                documented_symbols += 1;
+                documented_symbol_details.push(DocumentedSymbol {
                     specifier: specifier.clone(),
                     name: node.get_name().to_string(),
                     kind: format_doc_node_kind(&node.def),
@@ -108,8 +175,9 @@ pub fn analyze_doc_nodes(doc_nodes: &DocNodesByUrl) -> DocumentationCoverage {
                     }),
                 });
             } else {
-                documented_symbols += 1;
-                documented_symbol_details.push(DocumentedSymbol {
+                debug!("    ❌ NO JSDoc found for this symbol!");
+                debug!("    ➡️  UNDOCUMENTED");
+                undocumented_symbols.push(UndocumentedSymbol {
                     specifier: specifier.clone(),
                     name: node.get_name().to_string(),
                     kind: format_doc_node_kind(&node.def),
@@ -129,6 +197,13 @@ pub fn analyze_doc_nodes(doc_nodes: &DocNodesByUrl) -> DocumentationCoverage {
     if total_symbols == 0 {
         documented_symbols = 0;
     }
+
+    info!("========== SUMMARY ==========");
+    info!("Total symbols analyzed: {}", total_symbols);
+    info!("Documented symbols: {}", documented_symbols);
+    info!("Undocumented symbols: {}", undocumented_symbols.len());
+    info!("Coverage: {:.1}%", if total_symbols > 0 { (documented_symbols as f32 / total_symbols as f32) * 100.0 } else { 100.0 });
+    info!("=============================");
 
     DocumentationCoverage {
         total_symbols,
@@ -156,11 +231,65 @@ fn format_doc_node_kind(def: &DocNodeDef) -> String {
 
 /// Build doc nodes for a package version using in-memory source files, mirroring
 /// the server-side compilation pipeline.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn generate_doc_nodes_from_files(
     scope: &str,
     package: &str,
     version: &str,
     exports: &IndexMap<String, String>,
+    imports: &IndexMap<String, String>,
+    files: &HashMap<String, Vec<u8>>,
+) -> Result<DocNodesByUrl> {
+    generate_doc_nodes_from_files_impl(scope, package, version, exports, imports, files)
+}
+
+/// Async version for WASM
+#[cfg(target_arch = "wasm32")]
+pub async fn generate_doc_nodes_from_files(
+    scope: &str,
+    package: &str,
+    version: &str,
+    exports: &IndexMap<String, String>,
+    imports: &IndexMap<String, String>,
+    files: &HashMap<String, Vec<u8>>,
+) -> Result<DocNodesByUrl> {
+    generate_doc_nodes_from_files_async(scope, package, version, exports, imports, files).await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn generate_doc_nodes_from_files_impl(
+    scope: &str,
+    package: &str,
+    version: &str,
+    exports: &IndexMap<String, String>,
+    imports: &IndexMap<String, String>,
+    files: &HashMap<String, Vec<u8>>,
+) -> Result<DocNodesByUrl> {
+    TokioRuntimeBuilder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(generate_doc_nodes_core(scope, package, version, exports, imports, files))
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn generate_doc_nodes_from_files_async(
+    scope: &str,
+    package: &str,
+    version: &str,
+    exports: &IndexMap<String, String>,
+    imports: &IndexMap<String, String>,
+    files: &HashMap<String, Vec<u8>>,
+) -> Result<DocNodesByUrl> {
+    generate_doc_nodes_core(scope, package, version, exports, imports, files).await
+}
+
+/// Core async implementation shared by both WASM and non-WASM builds.
+async fn generate_doc_nodes_core(
+    scope: &str,
+    package: &str,
+    version: &str,
+    exports: &IndexMap<String, String>,
+    imports: &IndexMap<String, String>,
     files: &HashMap<String, Vec<u8>>,
 ) -> Result<DocNodesByUrl> {
     let base_url = Url::parse("memory://jsr/").expect("valid base url");
@@ -193,33 +322,31 @@ pub fn generate_doc_nodes_from_files(
     let loader = MemoryLoader { files };
     let resolver = JsrInPackageResolver {
         member: workspace_member,
+        imports: imports.clone(),
     };
 
-    TokioRuntimeBuilder::new_current_thread()
-        .enable_all()
-        .build()?
-        .block_on(graph.build(
-            roots.clone(),
-            vec![],
-            &loader,
-            BuildOptions {
-                is_dynamic: false,
-                module_analyzer: &module_analyzer,
-                file_system: &deno_graph::source::NullFileSystem,
-                jsr_url_provider: &PassthroughJsrUrlProvider,
-                passthrough_jsr_specifiers: true,
-                resolver: Some(&resolver),
-                npm_resolver: None,
-                reporter: None,
-                executor: Default::default(),
-                locker: None,
-                skip_dynamic_deps: false,
-                module_info_cacher: Default::default(),
-                unstable_bytes_imports: false,
-                unstable_text_imports: false,
-                jsr_metadata_store: None,
-            },
-        ));
+    graph.build(
+        roots.clone(),
+        vec![],
+        &loader,
+        BuildOptions {
+            is_dynamic: false,
+            module_analyzer: &module_analyzer,
+            file_system: &deno_graph::source::NullFileSystem,
+            jsr_url_provider: &PassthroughJsrUrlProvider,
+            passthrough_jsr_specifiers: true,
+            resolver: Some(&resolver),
+            npm_resolver: None,
+            reporter: None,
+            executor: Default::default(),
+            locker: None,
+            skip_dynamic_deps: false,
+            module_info_cacher: Default::default(),
+            unstable_bytes_imports: false,
+            unstable_text_imports: false,
+            jsr_metadata_store: None,
+        },
+    ).await;
 
     graph.valid().with_context(|| "invalid module graph")?;
 
@@ -235,6 +362,139 @@ pub fn generate_doc_nodes_from_files(
 
     let doc_nodes = parser.parse()?;
     Ok(doc_nodes)
+}
+
+/// Generate doc nodes from a local JSR package directory
+#[cfg(not(target_arch = "wasm32"))]
+pub fn generate_doc_nodes_from_local_path(local_path: &Path) -> Result<DocNodesByUrl> {
+    use std::fs;
+
+    info!("Loading package from local path: {}", local_path.display());
+
+    // Read and parse deno.json
+    let deno_json_path = local_path.join("deno.json");
+    if !deno_json_path.exists() {
+        bail!("deno.json not found at {}", deno_json_path.display());
+    }
+
+    debug!("Reading deno.json from {}", deno_json_path.display());
+    let deno_json_content = fs::read_to_string(&deno_json_path)
+        .with_context(|| format!("failed to read deno.json at {}", deno_json_path.display()))?;
+
+    let deno_json: serde_json::Value = serde_json::from_str(&deno_json_content)
+        .context("failed to parse deno.json")?;
+
+    // Extract package info
+    let name = deno_json["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("deno.json missing 'name' field"))?;
+
+    let version = deno_json["version"]
+        .as_str()
+        .ok_or_else(|| anyhow!("deno.json missing 'version' field"))?;
+
+    // Parse scope and package name from @scope/package format
+    let (scope, package) = parse_package_name(name)?;
+
+    debug!("Package: @{}/{} v{}", scope, package, version);
+
+    // Extract exports
+    let exports_obj = deno_json["exports"]
+        .as_object()
+        .ok_or_else(|| anyhow!("deno.json missing 'exports' field"))?;
+
+    let mut exports = IndexMap::new();
+    for (key, value) in exports_obj {
+        let export_path = value
+            .as_str()
+            .ok_or_else(|| anyhow!("export value for '{}' is not a string", key))?;
+        exports.insert(key.clone(), export_path.to_string());
+    }
+
+    debug!("Found {} export(s)", exports.len());
+
+    // Extract imports (import map) if present
+    let mut imports = IndexMap::new();
+    if let Some(imports_obj) = deno_json["imports"].as_object() {
+        for (key, value) in imports_obj {
+            if let Some(import_path) = value.as_str() {
+                imports.insert(key.clone(), import_path.to_string());
+            }
+        }
+        debug!("Found {} import map entries", imports.len());
+    }
+
+    // Collect all TypeScript/JavaScript files
+    let mut files = HashMap::new();
+    collect_source_files(local_path, local_path, &mut files)?;
+
+    debug!("Collected {} file(s)", files.len());
+
+    // Generate doc nodes
+    generate_doc_nodes_from_files(&scope, &package, version, &exports, &imports, &files)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_package_name(name: &str) -> Result<(String, String)> {
+    let trimmed = name.trim().strip_prefix('@').unwrap_or(name);
+    let (scope, package) = trimmed
+        .split_once('/')
+        .ok_or_else(|| anyhow!("package name must be in the form @scope/package"))?;
+
+    if scope.is_empty() || package.is_empty() {
+        bail!("invalid package name: {}", name);
+    }
+
+    Ok((scope.to_string(), package.to_string()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn collect_source_files(
+    base_path: &Path,
+    current_path: &Path,
+    files: &mut HashMap<String, Vec<u8>>,
+) -> Result<()> {
+    use std::fs;
+
+    if !current_path.exists() {
+        return Ok(());
+    }
+
+    if current_path.is_file() {
+        let extension = current_path.extension().and_then(|e| e.to_str());
+        if matches!(extension, Some("ts") | Some("tsx") | Some("js") | Some("jsx") | Some("mts") | Some("cts")) {
+            let relative_path = current_path.strip_prefix(base_path)
+                .with_context(|| format!("failed to compute relative path for {}", current_path.display()))?;
+
+            let key = format!("/{}", relative_path.to_string_lossy().replace('\\', "/"));
+
+            debug!("Reading file: {}", key);
+            let content = fs::read(current_path)
+                .with_context(|| format!("failed to read file {}", current_path.display()))?;
+
+            files.insert(key, content);
+        }
+        return Ok(());
+    }
+
+    if current_path.is_dir() {
+        // Skip common directories that shouldn't be analyzed
+        let dir_name = current_path.file_name().and_then(|n| n.to_str());
+        if matches!(dir_name, Some("node_modules") | Some("target") | Some(".git") | Some("dist") | Some("docs")) {
+            debug!("Skipping directory: {}", current_path.display());
+            return Ok(());
+        }
+
+        for entry in fs::read_dir(current_path)
+            .with_context(|| format!("failed to read directory {}", current_path.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            collect_source_files(base_path, &path, files)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn normalize_export_target(path: &str) -> String {
@@ -352,6 +612,7 @@ impl JsrUrlProvider for PassthroughJsrUrlProvider {
 #[derive(Debug)]
 struct JsrInPackageResolver {
     member: WorkspaceMember,
+    imports: IndexMap<String, String>,
 }
 
 impl Resolver for JsrInPackageResolver {
@@ -382,6 +643,31 @@ impl Resolver for JsrInPackageResolver {
                 .base
                 .join(export)
                 .map_err(|err| ResolveError::Other(JsErrorBox::generic(err.to_string())));
+        }
+
+        // Check import map for bare specifiers
+        if !specifier_text.starts_with("./")
+            && !specifier_text.starts_with("../")
+            && !specifier_text.starts_with("/")
+            && !specifier_text.contains("://")
+        {
+            // Try to match the import map
+            for (key, value) in &self.imports {
+                if specifier_text == key || specifier_text.starts_with(&format!("{}/", key)) {
+                    // Replace the matched prefix with the mapped value
+                    let mapped = if specifier_text == key {
+                        value.clone()
+                    } else {
+                        specifier_text.replacen(key, value, 1)
+                    };
+
+                    // For npm: specifiers, we'll allow them through (deno_graph will handle them)
+                    if mapped.starts_with("npm:") || mapped.starts_with("jsr:") {
+                        return ModuleSpecifier::parse(&mapped)
+                            .map_err(|err| ResolveError::Other(JsErrorBox::generic(err.to_string())));
+                    }
+                }
+            }
         }
 
         resolve_import(specifier_text, &referrer_range.specifier)
