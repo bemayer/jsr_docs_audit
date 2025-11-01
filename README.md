@@ -4,14 +4,13 @@ Analyze documentation coverage for JSR packages, both via CLI and web interface 
 
 ## 🌐 Web Interface
 
-**[Live Demo](https://bemayer.github.io/jsr_docs_audit/)** (once deployed)
+**[JSR Docs Audit](https://bemayer.github.io/jsr_docs_audit/)**
 
 Features:
-- 🔍 Search JSR packages with real-time autocomplete
+- 🔍 Search JSR package
 - 📊 Instant documentation coverage analysis
 - 📝 Detailed symbol-level reporting
 - ⚡ Runs entirely in your browser via WebAssembly
-- 🎨 Clean, responsive interface
 
 ## CLI usage
 
@@ -96,15 +95,6 @@ python3 -m http.server 8000 --directory dist
 
 Then open http://localhost:8000
 
-## 🚀 Deployment
-
-The project includes a GitHub Actions workflow that automatically builds and deploys to GitHub Pages on push to `main`/`master`.
-
-To set up GitHub Pages:
-1. Go to repository Settings → Pages
-2. Source: "GitHub Actions"
-3. Push to `main`/`master` to trigger deployment
-
 ## Development
 
 ```bash
@@ -147,4 +137,4 @@ jsr_docs_audit/
 
 ## 📜 License
 
-MIT (or specify your license)
+MIT
