@@ -14,10 +14,9 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use deno_ast::{MediaType, ModuleSpecifier, ParsedSource};
 use deno_doc::node::DeclarationKind;
@@ -31,6 +30,8 @@ use deno_graph::source::{
     ResolveError, Resolver, load_data_url,
 };
 use deno_graph::{BuildOptions, GraphKind, ModuleGraph, WorkspaceMember, resolve_import};
+use deno_graph::packages::JsrVersionResolver;
+use std::borrow::Cow;
 use deno_semver::{StackString, Version, jsr::JsrPackageReqReference};
 use futures::FutureExt;
 use indexmap::IndexMap;
@@ -325,6 +326,8 @@ async fn generate_doc_nodes_core(
         imports: imports.clone(),
     };
 
+    let jsr_version_resolver = JsrVersionResolver::default();
+
     graph.build(
         roots.clone(),
         vec![],
@@ -334,6 +337,7 @@ async fn generate_doc_nodes_core(
             module_analyzer: &module_analyzer,
             file_system: &deno_graph::source::NullFileSystem,
             jsr_url_provider: &PassthroughJsrUrlProvider,
+            jsr_version_resolver: Cow::Borrowed(&jsr_version_resolver),
             passthrough_jsr_specifiers: true,
             resolver: Some(&resolver),
             npm_resolver: None,
